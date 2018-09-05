@@ -1,0 +1,2 @@
+CREATE TABLE app_keys (key_id text not null primary key, app int not null, fingerprint text not null, invalid bool not null default 'false', key blob not null);
+CREATE TABLE authn_tokens (token_id text not null primary key, app int not null, installation int, issued datetime not null, expires datetime not null, token_request_key TEXT NOT NULL, invalid bool not null default 'false', token TEXT not null);
