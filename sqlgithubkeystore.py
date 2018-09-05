@@ -3,7 +3,7 @@ import hashlib
 import json
 import random
 import sqlite3
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Iterable, List, Tuple, Type
 
 import Crypto.PublicKey.RSA
 import Crypto.PublicKey.pubkey
@@ -61,26 +61,26 @@ def authn_token_selector_column(selector: TokenSelectorType) -> str:
 tzutc = dateutil.tz.tzutc()  # pylint: disable=invalid-name
 epoch = datetime.datetime(1970, 1, 1, 0, 0, 0, 0, tzutc)  # pylint: disable=invalid-name
 
-
-def key_row_to_tuple(row: sqlite3.Row) -> StoredAppKey:
-    expected_types = (bytes, str, str, int, int)
+def _validate_row(row: sqlite3.Row, expected_types: Iterable[Type]) -> None:
     for i, (row_value, expected_type) in enumerate(zip(row, expected_types)):
         if not isinstance(row_value, expected_type):
             raise ValueError('row[{}] is {} type {}, not type {}'.format(
                 i, row_value, type(row_value), expected_type))
+
+
+def key_row_to_tuple(row: sqlite3.Row) -> StoredAppKey:
+    expected_types = (bytes, str, str, int, int)
+    _validate_row(row, expected_types)
     pubkey = Crypto.PublicKey.RSA.importKey(row[0])
     return StoredAppKey(*([pubkey] + list(row[1:-1])) + [bool(row[-1])])
 
 
 def token_row_to_tuple(row: sqlite3.Row) -> StoredToken:
-    for i in range(7):
-        if not isinstance(row[i], str):
-            raise ValueError('row[{}] is {}, not str'.format(i, type(row[i])))
-    if not isinstance(row[7], bool):
-        raise ValueError('row[7] is {}, not bool'.format(type(row[7])))
-    issued = dateutil.parser.parse(row[5])
-    expires = dateutil.parser.parse(row[6])
-    return StoredToken(*(list(row[:5]) + [issued, expires] + [row[7]]))
+    expected_types = (str, str, int, int, str, str, str, int)
+    _validate_row(row, expected_types)
+    issued = dateutil.parser.parse(row[4])
+    expires = dateutil.parser.parse(row[5])
+    return StoredToken(*(list(row[:4]) + [issued, expires, row[6], bool(row[7])]))
 
 
 class SQLKeyStore(AppKeyStore, AuthTokenStore):
