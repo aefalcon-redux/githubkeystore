@@ -19,6 +19,12 @@ InstallationId = Union[str, int]  # pylint: disable=invalid-name
 StoredAppKey = NamedTuple(
     'StoredAppKey', [('key', Crypto.PublicKey.pubkey.pubkey), ('key_id', str),
                      ('fingerprint', str), ('app', AppId), ('invalid', bool)])
+StoredToken = NamedTuple(
+    'StoredToken',
+    [('token_id', str), ('token', str), ('app', AppId),
+     ('installation', Optional[InstallationId]), ('issued', datetime.datetime),
+     ('expires', datetime.datetime), ('token_request_key', str),
+     ('invalid', bool)])
 
 AppTokenFactory = Callable[[AppId, StoredAppKey], str]  # pylint: disable=invalid-name
 InstallationTokenFactory = Callable[[str, InstallationId],
@@ -152,30 +158,28 @@ class NoSuchToken(Exception):
 class AuthTokenStore(ABC):
 
     @abstractmethod
-    def get_app_authn_token(self, app_id: AppId) -> str:
+    def get_app_authn_token(self, app_id: AppId) -> StoredToken:
         pass
 
     @abstractmethod
     def get_installation_authn_token(
-            self, app: AppId,
-            installation: InstallationId) -> Tuple[str, datetime.datetime]:
+            self, app: AppId, installation: InstallationId) -> StoredToken:
         pass
 
     @abstractmethod
     def require_app_authn_token(self, app_id: AppId,
-                                make_new_token: AppTokenFactory) -> str:
+                                make_new_token: AppTokenFactory) -> StoredToken:
         pass
 
     @abstractmethod
     def require_installation_authn_token(
             self, app: AppId, installation: InstallationId,
             new_app_token: AppTokenFactory,
-            new_installation_token: InstallationTokenFactory
-    ) -> Tuple[str, datetime.datetime]:
+            new_installation_token: InstallationTokenFactory) -> StoredToken:
         pass
 
     @abstractmethod
-    def get_authn_token(self, selector: TokenSelector) -> str:
+    def get_authn_token(self, selector: TokenSelector) -> StoredToken:
         pass
 
     @abstractmethod
@@ -183,14 +187,14 @@ class AuthTokenStore(ABC):
         pass
 
     @abstractmethod
-    def add_app_authn_token(self, token: str) -> None:
+    def add_app_authn_token(self, token: str) -> StoredToken:
         pass
 
     @abstractmethod
     def add_installation_authn_token(
             self, token: str, app: AppId, installation: InstallationId,
             issued: datetime.datetime, expires: datetime.datetime,
-            iss_jti: str) -> None:
+            iss_jti: str) -> StoredToken:
         pass
 
     @abstractmethod

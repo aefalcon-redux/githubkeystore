@@ -31,6 +31,7 @@ from githubkeystore import (
     NoSuchKey,
     NoSuchToken,
     StoredAppKey,
+    StoredToken,
     TokenSelector,
     TokenSelectorType,
 )
@@ -62,18 +63,24 @@ epoch = datetime.datetime(1970, 1, 1, 0, 0, 0, 0, tzutc)  # pylint: disable=inva
 
 
 def key_row_to_tuple(row: sqlite3.Row) -> StoredAppKey:
+    expected_types = (bytes, str, str, int, int)
+    for i, (row_value, expected_type) in enumerate(zip(row, expected_types)):
+        if not isinstance(row_value, expected_type):
+            raise ValueError('row[{}] is {} type {}, not type {}'.format(
+                i, row_value, type(row_value), expected_type))
     pubkey = Crypto.PublicKey.RSA.importKey(row[0])
-    if not isinstance(row[0], bytes):
-        raise ValueError('row[0] is {}, not bytes'.format(type(row[0])))
-    if not isinstance(row[1], str):
-        raise ValueError('row[1] is {}, not str'.format(type(row[1])))
-    if not isinstance(row[2], str):
-        raise ValueError('row[2] is {}, not str'.format(type(row[2])))
-    if not isinstance(row[3], int):
-        raise ValueError('row[4] is {}, not int'.format(type(row[3])))
-    if not isinstance(row[4], bool):
-        raise ValueError('row[4] is {}, not bool'.format(type(row[4])))
-    return StoredAppKey(pubkey, row[1], row[2], row[3], row[4])
+    return StoredAppKey(*([pubkey] + list(row[1:-1])) + [bool(row[-1])])
+
+
+def token_row_to_tuple(row: sqlite3.Row) -> StoredToken:
+    for i in range(7):
+        if not isinstance(row[i], str):
+            raise ValueError('row[{}] is {}, not str'.format(i, type(row[i])))
+    if not isinstance(row[7], bool):
+        raise ValueError('row[7] is {}, not bool'.format(type(row[7])))
+    issued = dateutil.parser.parse(row[5])
+    expires = dateutil.parser.parse(row[6])
+    return StoredToken(*(list(row[:5]) + [issued, expires] + [row[7]]))
 
 
 class SQLKeyStore(AppKeyStore, AuthTokenStore):
@@ -89,13 +96,13 @@ class SQLKeyStore(AppKeyStore, AuthTokenStore):
         with self.conn:
             try:
                 self.conn.execute(
-                    "INSERT INTO app_keys (key_id, app, fingerprint, invalid, key) VALUES (?, ?, ?, 'false', ?)",
+                    "INSERT INTO app_keys (key_id, app, fingerprint, invalid, key) VALUES (?, ?, ?, 0, ?)",
                     (kid, int(app_id), fingerprint, der))
             except sqlite3.IntegrityError:
                 raise DuplicateKey(kid)
 
     def _get_app_key_auto(self, app: AppId) -> StoredAppKey:
-        select_stmt = "SELECT key, key_id, fingerprint, app, invalid FROM app_keys WHERE app = ? AND invalid = 'false' ORDER BY RANDOM() LIMIT 1"
+        select_stmt = "SELECT key, key_id, fingerprint, app, invalid FROM app_keys WHERE app = ? AND invalid = 0 ORDER BY RANDOM() LIMIT 1"
         cur = self.conn.cursor()
         cur.execute(select_stmt, (int(app),))
         if cur.rowcount == 0:
@@ -103,6 +110,8 @@ class SQLKeyStore(AppKeyStore, AuthTokenStore):
         elif cur.rowcount > 1:
             raise RuntimeError("selected {} app keys".format(cur.rowcount))
         record = cur.fetchone()
+        if not record:
+            raise AppHasNoKey(app)
         return key_row_to_tuple(record)
 
     def get_app_key_auto(self, app: AppId) -> StoredAppKey:
@@ -117,6 +126,8 @@ class SQLKeyStore(AppKeyStore, AuthTokenStore):
             cur = self.conn.cursor()
             cur.execute(select_stmt, (key_selector.identifier,))
             record = cur.fetchone()
+            if not record:
+                raise NoSuchKey(key_selector)
             return key_row_to_tuple(record)
 
     def list_app_keys(self, app: AppId,
@@ -154,23 +165,23 @@ class SQLKeyStore(AppKeyStore, AuthTokenStore):
                 raise RuntimeError("deleted {} keys with selector {} {}".format(
                     cur.rowcount, key.type.name, key.identifier))
 
-    def _require_app_authn_token(self, app_id: AppId,
-                                 make_new_token: AppTokenFactory) -> str:
+    def _require_app_authn_token(
+            self, app_id: AppId,
+            make_new_token: AppTokenFactory) -> StoredToken:
         try:
             return self._get_app_authn_token(app_id)
         except AppHasNoToken:
             pass
         stored_key = self._get_app_key_auto(app_id)
         jwt = make_new_token(app_id, stored_key)
-        self._add_app_authn_token(jwt)
-        return jwt
+        return self._add_app_authn_token(jwt)
 
     def require_app_authn_token(self, app_id: AppId,
-                                make_new_token: AppTokenFactory) -> str:
+                                make_new_token: AppTokenFactory) -> StoredToken:
         with self.conn:
             return self._require_app_authn_token(app_id, make_new_token)
 
-    def _add_app_authn_token(self, token: str) -> None:
+    def _add_app_authn_token(self, token: str) -> StoredToken:
         unverified_claims = jose.jwt.get_unverified_claims(token)
         missing_claims = set(['iss', 'jti', 'exp', 'mobetter.iss_kid']) - set(
             unverified_claims.keys())
@@ -185,41 +196,45 @@ class SQLKeyStore(AppKeyStore, AuthTokenStore):
             seconds=int(unverified_claims['exp']))
         insert_stmt = (
             "INSERT INTO authn_tokens (token_id, app, token_request_key, issued, expires, invalid, token) "
-            "VALUES (?, ?, ?, ?, ?, 'false', ?)")
+            "VALUES (?, ?, ?, ?, ?, 0, ?)")
         self.conn.execute(
             insert_stmt,
             (token_id, app, token_request_key, issued, expires, token))
+        return StoredToken(token_id, token, app, None, issued, expires,
+                           token_request_key, False)
 
-    def add_app_authn_token(self, token: str) -> None:
+    def add_app_authn_token(self, token: str) -> StoredToken:
         with self.conn:
-            self._add_app_authn_token(token)
+            return self._add_app_authn_token(token)
 
     def _add_installation_authn_token(
             self, token: str, app: AppId, installation: InstallationId,
             issued: datetime.datetime, expires: datetime.datetime,
-            iss_jti: str) -> None:
+            iss_jti: str) -> StoredToken:
         issued_seconds = int((issued - epoch).total_seconds())
         random_part = random.getrandbits(16).to_bytes(2, 'big').hex()
         token_id = f'{app}:{iss_jti}:{issued_seconds}-{random_part}'
         token_request_key = f'token:{iss_jti}'
         insert_stmt = (
             "INSERT INTO authn_tokens (token_id, app, installation, token_request_key, issued, expires, invalid, token) "
-            "VALUES (?, ?, ?, ?, ?, ?, 'false', ?)")
+            "VALUES (?, ?, ?, ?, ?, ?, 0, ?)")
         self.conn.execute(insert_stmt,
                           (token_id, app, installation, token_request_key,
                            issued, expires, token))
+        return StoredToken(token_id, token, app, installation, issued, expires,
+                           token_request_key, False)
 
     def add_installation_authn_token(
             self, token: str, app: AppId, installation: InstallationId,
             issued: datetime.datetime, expires: datetime.datetime,
-            iss_jti: str) -> None:
+            iss_jti: str) -> StoredToken:
         with self.conn:
             return self._add_installation_authn_token(token, app, installation,
                                                       issued, expires, iss_jti)
 
-    def get_authn_token(self, selector: TokenSelector) -> str:
+    def get_authn_token(self, selector: TokenSelector) -> StoredToken:
         id_column = authn_token_selector_column(selector.type)
-        select_stmt = "SELECT token FROM authn_tokens WHERE {} = ?".format(
+        select_stmt = "SELECT token_id, token, app, installation, issued, expires, token_request_key, invalid FROM authn_tokens WHERE {} = ?".format(
             id_column)
         with self.conn:
             cur = self.conn.cursor()
@@ -229,16 +244,13 @@ class SQLKeyStore(AppKeyStore, AuthTokenStore):
             elif cur.rowcount > 1:
                 raise RuntimeError('{} matching otkens for {} {}'.format(
                     cur.rowcount, selector.type.name, selector.identifier))
-            token = cur.fetchone()[0]
-            if not isinstance(token, str):
-                raise ValueError(f'token {token} is not string')
-            return token
+            row = cur.fetchone()
+            return token_row_to_tuple(row)
 
     def _get_installation_authn_token(
-            self, app: AppId,
-            installation: InstallationId) -> Tuple[str, datetime.datetime]:
+            self, app: AppId, installation: InstallationId) -> StoredToken:
         select_stmt = (
-            "SELECT token, expires FROM authn_tokens WHERE app = ? AND installation = ? AND invalid = 'false' AND expires > DATETIME('now') "
+            "SELECT token_id, token, app, installation, issued, expires, token_request_key, invalid FROM authn_tokens WHERE app = ? AND installation = ? AND invalid = 0 AND expires > DATETIME('now') "
             "ORDER BY expires DESC LIMIT 1")
         cur = self.conn.cursor()
         cur.execute(select_stmt, (int(app), int(installation)))
@@ -249,41 +261,35 @@ class SQLKeyStore(AppKeyStore, AuthTokenStore):
             raise RuntimeError('row count = 0')
         elif cur.rowcount > 1:
             raise RuntimeError('selected more than one record')
-        token = record[0]
-        expires = record[1]
-        if not isinstance(token, str):
-            raise ValueError(f'token {token} is not string')
-        if not isinstance(expires, str):
-            raise ValueError(f'expires {expires} is not datetime')
-        return token, dateutil.parser.parse(expires)
+        return token_row_to_tuple(record)
 
     def get_installation_authn_token(
-            self, app: AppId,
-            installation: InstallationId) -> Tuple[str, datetime.datetime]:
+            self, app: AppId, installation: InstallationId) -> StoredToken:
         with self.conn:
             return self._get_installation_authn_token(app, installation)
 
     def require_installation_authn_token(
             self, app: AppId, installation: InstallationId,
             new_app_token: AppTokenFactory,
-            new_installation_token: InstallationTokenFactory
-    ) -> Tuple[str, datetime.datetime]:
+            new_installation_token: InstallationTokenFactory) -> StoredToken:
         with self.conn:
             try:
                 return self._get_installation_authn_token(app, installation)
             except InstallationHasNoToken:
                 pass
             app_auth_token = self._require_app_authn_token(app, new_app_token)
-            jwt, expires = new_installation_token(app_auth_token, installation)
+            jwt, expires = new_installation_token(app_auth_token.token,
+                                                  installation)
             now = datetime.datetime.now(tzutc)
             # TODO: get authenticationt token jti
-            self._add_installation_authn_token(jwt, app, installation, now,
-                                               expires, 'unknown')
-            return jwt, expires
+            return self._add_installation_authn_token(
+                jwt, app, installation, now, expires,
+                'token:' + app_auth_token.token_id)
 
-    def _get_app_authn_token(self, app_id: AppId) -> str:
+    def _get_app_authn_token(self, app_id: AppId) -> StoredToken:
         select_stmt = (
-            "SELECT token FROM authn_tokens WHERE app = ? AND installation IS NULL AND invalid = 'false' AND expires > DATETIME('now') "
+            "SELECT token_id, token, app, installation, issued, expires, token_request_key, invalid FROM authn_tokens "
+            "WHERE app = ? AND installation IS NULL AND invalid = 0 AND expires > DATETIME('now') "
             "ORDER BY expires DESC LIMIT 1")
         cur = self.conn.cursor()
         cur.execute(select_stmt, (app_id,))
@@ -294,12 +300,9 @@ class SQLKeyStore(AppKeyStore, AuthTokenStore):
             raise RuntimeError('row count = 0')
         elif cur.rowcount > 1:
             raise RuntimeError('selected more than one record')
-        token = record[0]
-        if not isinstance(token, str):
-            raise ValueError(f'token {token} is not string')
-        return token
+        return token_row_to_tuple(record)
 
-    def get_app_authn_token(self, app_id: AppId) -> str:
+    def get_app_authn_token(self, app_id: AppId) -> StoredToken:
         with self.conn:
             return self._get_app_authn_token(app_id)
 
@@ -334,7 +337,7 @@ class SQLKeyStore(AppKeyStore, AuthTokenStore):
         id_column = authn_token_selector_column(selector_type)
         select_stmt = (
             f"SELECT {id_column} FROM authn_tokens "
-            f"WHERE app = ? AND installation IS NULL AND invalid = 'false' AND expires > DATETIME('now')"
+            f"WHERE app = ? AND installation IS NULL AND invalid = 0 AND expires > DATETIME('now')"
         )
         with self.conn:
             cur = self.conn.cursor()
@@ -400,12 +403,11 @@ class SqlKeyManager:
     def __init__(self, store: SQLKeyStore) -> None:
         self.store = store
 
-    def get_app_authn_token(self, app: AppId) -> str:
+    def get_app_authn_token(self, app: AppId) -> StoredToken:
         return self.store.require_app_authn_token(app, create_app_token)
 
     def get_installation_authn_token(
-            self, app: AppId,
-            installation: InstallationId) -> Tuple[str, datetime.datetime]:
+            self, app: AppId, installation: InstallationId) -> StoredToken:
         return self.store.require_installation_authn_token(
             app, installation, create_app_token, create_installation_token)
 
@@ -419,10 +421,10 @@ class SqlAppKeyManager:
         self.key_manager = key_manager
         self.app = app
 
-    def get_app_authn_token(self) -> str:
+    def get_app_authn_token(self) -> StoredToken:
         return self.key_manager.get_app_authn_token(self.app)
 
-    def get_installation_authn_token(self, installation: InstallationId
-                                    ) -> Tuple[str, datetime.datetime]:
+    def get_installation_authn_token(
+            self, installation: InstallationId) -> StoredToken:
         return self.key_manager.get_installation_authn_token(
             self.app, installation)
