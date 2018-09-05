@@ -61,6 +61,21 @@ tzutc = dateutil.tz.tzutc()  # pylint: disable=invalid-name
 epoch = datetime.datetime(1970, 1, 1, 0, 0, 0, 0, tzutc)  # pylint: disable=invalid-name
 
 
+def key_row_to_tuple(row: sqlite3.Row) -> StoredAppKey:
+    pubkey = Crypto.PublicKey.RSA.importKey(row[0])
+    if not isinstance(row[0], bytes):
+        raise ValueError('row[0] is {}, not bytes'.format(type(row[0])))
+    if not isinstance(row[1], str):
+        raise ValueError('row[1] is {}, not str'.format(type(row[1])))
+    if not isinstance(row[2], str):
+        raise ValueError('row[2] is {}, not str'.format(type(row[2])))
+    if not isinstance(row[3], int):
+        raise ValueError('row[4] is {}, not int'.format(type(row[3])))
+    if not isinstance(row[4], bool):
+        raise ValueError('row[4] is {}, not bool'.format(type(row[4])))
+    return StoredAppKey(pubkey, row[1], row[2], row[3], row[4])
+
+
 class SQLKeyStore(AppKeyStore, AuthTokenStore):
 
     def __init__(self, conn: sqlite3.Connection) -> None:
@@ -80,7 +95,7 @@ class SQLKeyStore(AppKeyStore, AuthTokenStore):
                 raise DuplicateKey(kid)
 
     def _get_app_key_auto(self, app: AppId) -> StoredAppKey:
-        select_stmt = "SELECT key, key_id FROM app_keys WHERE app = ? AND invalid = 'false' ORDER BY RANDOM() LIMIT 1"
+        select_stmt = "SELECT key, key_id, fingerprint, app, invalid FROM app_keys WHERE app = ? AND invalid = 'false' ORDER BY RANDOM() LIMIT 1"
         cur = self.conn.cursor()
         cur.execute(select_stmt, (int(app),))
         if cur.rowcount == 0:
@@ -88,8 +103,7 @@ class SQLKeyStore(AppKeyStore, AuthTokenStore):
         elif cur.rowcount > 1:
             raise RuntimeError("selected {} app keys".format(cur.rowcount))
         record = cur.fetchone()
-        pubkey = Crypto.PublicKey.RSA.importKey(record[0])
-        return StoredAppKey(pubkey, record[1])
+        return key_row_to_tuple(record)
 
     def get_app_key_auto(self, app: AppId) -> StoredAppKey:
         with self.conn:
@@ -98,13 +112,12 @@ class SQLKeyStore(AppKeyStore, AuthTokenStore):
     def get_app_key(self, key_selector: KeySelector) -> StoredAppKey:
         id_column = key_selector_column(key_selector.type)
         with self.conn:
-            select_stmt = "SELECT key FROM app_keys WHERE {} = ?".format(
+            select_stmt = "SELECT key, key_id, fingerprint, app, invalid FROM app_keys WHERE {} = ?".format(
                 id_column)
             cur = self.conn.cursor()
             cur.execute(select_stmt, (key_selector.identifier,))
             record = cur.fetchone()
-            pubkey = Crypto.PublicKey.RSA.importKey(record[0])
-            return StoredAppKey(pubkey, record[1])
+            return key_row_to_tuple(record)
 
     def list_app_keys(self, app: AppId,
                       selector: KeySelectorType) -> List[KeySelectorIdentifier]:

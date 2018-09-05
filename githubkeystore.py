@@ -17,7 +17,8 @@ AppId = Union[str, int]  # pylint: disable=invalid-name
 InstallationId = Union[str, int]  # pylint: disable=invalid-name
 
 StoredAppKey = NamedTuple(
-    'StoredAppKey', [('key', Crypto.PublicKey.pubkey.pubkey), ('key_id', str)])
+    'StoredAppKey', [('key', Crypto.PublicKey.pubkey.pubkey), ('key_id', str),
+                     ('fingerprint', str), ('app', AppId), ('invalid', bool)])
 
 AppTokenFactory = Callable[[AppId, StoredAppKey], str]  # pylint: disable=invalid-name
 InstallationTokenFactory = Callable[[str, InstallationId],
