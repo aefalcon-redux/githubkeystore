@@ -1,9 +1,10 @@
 import datetime
 import hashlib
 import json
+import logging
 import random
 import sqlite3
-from typing import Any, Dict, Iterable, List, Tuple, Type
+from typing import Any, Dict, Iterable, List, Tuple, Union, Type
 
 import Crypto.PublicKey.RSA
 import Crypto.PublicKey.pubkey
@@ -12,6 +13,7 @@ import dateutil.parser
 import jose.jwt
 import purl
 import requests
+import requests.models
 
 from githubkeystore import (
     AppHasNoKey,
@@ -35,6 +37,12 @@ from githubkeystore import (
     TokenSelector,
     TokenSelectorType,
 )
+
+logger = logging.getLogger(__name__)
+
+class RequestInstallationTokenError(Exception):
+    def __init__(self, msg: str, response: requests.models.Response) -> None:
+        super().__init__(msg, response)
 
 
 def fingerprint_key(key: Crypto.PublicKey.pubkey.pubkey) -> str:
@@ -61,7 +69,7 @@ def authn_token_selector_column(selector: TokenSelectorType) -> str:
 tzutc = dateutil.tz.tzutc()  # pylint: disable=invalid-name
 epoch = datetime.datetime(1970, 1, 1, 0, 0, 0, 0, tzutc)  # pylint: disable=invalid-name
 
-def _validate_row(row: sqlite3.Row, expected_types: Iterable[Type]) -> None:
+def _validate_row(row: sqlite3.Row, expected_types: Iterable[Union[Type,Tuple[Type,...]]]) -> None:
     for i, (row_value, expected_type) in enumerate(zip(row, expected_types)):
         if not isinstance(row_value, expected_type):
             raise ValueError('row[{}] is {} type {}, not type {}'.format(
@@ -69,14 +77,14 @@ def _validate_row(row: sqlite3.Row, expected_types: Iterable[Type]) -> None:
 
 
 def key_row_to_tuple(row: sqlite3.Row) -> StoredAppKey:
-    expected_types = (bytes, str, str, int, int)
+    expected_types = [bytes, str, str, int, int]
     _validate_row(row, expected_types)
     pubkey = Crypto.PublicKey.RSA.importKey(row[0])
     return StoredAppKey(*([pubkey] + list(row[1:-1])) + [bool(row[-1])])
 
 
 def token_row_to_tuple(row: sqlite3.Row) -> StoredToken:
-    expected_types = (str, str, int, int, str, str, str, int)
+    expected_types: List[Union[Type,Tuple[Type,...]]]  = [str, str, int, (int, type(None)), str, str, str, int]
     _validate_row(row, expected_types)
     issued = dateutil.parser.parse(row[4])
     expires = dateutil.parser.parse(row[5])
@@ -393,6 +401,15 @@ def create_installation_token(authn_token: str, installation_id: InstallationId
     }
     resp = requests.post(url, headers=headers)
     resp_doc = json.loads(resp.text)
+    required_fields = set(['token', 'expires_at'])
+    missing_fields = required_fields - set(resp_doc.keys())
+    if missing_fields:
+        logger.error("Received invalid token response")
+        logger.error("===== BEGIN RESPONSE =====")
+        for line in resp.text.splitlines():
+            logger.error(line.rstrip())
+        logger.error("===== END RESPONSE =====")
+        raise RequestInstallationTokenError('response missing fields: {}'.format(', '.join(missing_fields)), resp)
     token = resp_doc['token']
     expires = dateutil.parser.parse(resp_doc['expires_at'])
     return token, expires
