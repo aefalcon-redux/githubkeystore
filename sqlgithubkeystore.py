@@ -15,28 +15,8 @@ import purl
 import requests
 import requests.models
 
-from githubkeystore import (
-    AppHasNoKey,
-    AppHasNoToken,
-    AppTokenFactory,
-    AppId,
-    AppKeyStore,
-    AuthTokenStore,
-    DuplicateKey,
-    InstallationHasNoToken,
-    InstallationId,
-    InstallationTokenFactory,
-    InvalidToken,
-    KeySelector,
-    KeySelectorIdentifier,
-    KeySelectorType,
-    NoSuchKey,
-    NoSuchToken,
-    StoredAppKey,
-    StoredToken,
-    TokenSelector,
-    TokenSelectorType,
-)
+from githubkeystore import *
+
 
 logger = logging.getLogger(__name__)
 
